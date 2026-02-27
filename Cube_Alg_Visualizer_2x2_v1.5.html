@@ -1,0 +1,884 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cube Alg Visualizer 2×2 v1.5</title>
+
+<style>
+  :root{
+    --bg:#ffffff; --text:#000000;
+    --tile-bg:#ffffff; --tile-border:#dddddd;
+    --stroke:#000000;
+
+    /* outlines follow stroke (works in dark mode too) */
+    --outline: var(--stroke);
+
+    /* ...your existing vars... */
+  --tileBorderW: 1px;     /* single tiles default */
+  --groupBorderW: 3.5px;  /* connected default */
+  }
+
+  body.dark{
+    --bg:#0f1115; --text:#e9eef7;
+    --tile-bg:#151923; --tile-border:#2a3142;
+    --stroke:#e9eef7;
+
+    --outline: var(--stroke);
+  }
+
+  body{
+    font-family:system-ui,sans-serif;
+    padding:20px;
+    background:var(--bg);
+    color:var(--text);
+  }
+
+  textarea{
+    width: 1040px;
+    height: 120px;
+    background:var(--tile-bg);
+    color:var(--text);
+    border:1px solid var(--tile-border);
+    border-radius:10px;
+    padding:10px;
+    resize:none;
+    overflow-y:auto;
+  }
+
+  .controls{
+    display:flex;
+    gap:18px;
+    align-items:center;
+    margin-top:10px;
+    flex-wrap:wrap;
+  }
+
+  button{
+    background:var(--tile-bg);
+    color:var(--text);
+    border:1px solid var(--tile-border);
+    border-radius:10px;
+    padding:8px 12px;
+    cursor:pointer;
+  }
+
+  label{
+    user-select:none;
+    display:flex;
+    gap:8px;
+    align-items:center;
+    white-space:nowrap;
+  }
+
+  /* IMPORTANT: keep as grid or everything goes vertical */
+  #out{
+    --gapY: 20px;
+    --gapX: 30px;
+
+    position:relative;
+    display:grid;
+    gap: var(--gapY) var(--gapX);
+    margin-top:20px;
+    align-items:start;
+  }
+
+  .tile{
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+
+    position:relative;
+    z-index:1;
+  }
+
+  svg{
+  border: var(--tileBorderW) solid var(--outline);
+  border-radius:10px;
+  background:var(--tile-bg);
+  }
+
+  /* tiles inside bracket groups lose their own border */
+  .tile.no-border svg{
+    border:none;
+  }
+
+  /* group outline segments (one per row-span) */
+  .group-span{
+    position:relative;
+    z-index:3;           /* draw on top so the top edge is visible */
+    pointer-events:none;
+
+    height: 90px;        /* TILE */
+    align-self:start;
+    justify-self:stretch;
+  }
+
+  .group-span::before{
+  content:"";
+  position:absolute;
+  inset:0;
+  border: var(--groupBorderW) solid var(--outline);
+  border-radius:10px;
+  }
+
+  /* If the bracket group continues to the next line, don't draw the "end cap" */
+.group-span.no-right::before{
+  border-right: none;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+/* If the bracket group is continuing from the previous line, don't draw the "start cap" */
+.group-span.no-left::before{
+  border-left: none;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+</style>
+
+<link rel="icon" type="image/png" href="https://solvethecube.com/img/logo.png">
+
+</head>
+
+<body>
+
+<textarea id="alg">R R' R2 L L' L2 U U' U2 D D' D2 F F' F2 B B' B2 x x' x2 y y' y2 z z' z2</textarea>
+
+<div class="controls">
+  <button id="clearBtn">Clear</button>
+
+  <label>
+   Cube size:
+    <select id="cubeSelect">
+     <option value="https://loofergd.github.io/cube-alg-visualizer-3x3/">3×3</option>
+     <option value="https://loofergd.github.io/cube-alg-visualizer-2x2/" selected>2×2</option>
+    </select>
+  </label>
+
+  <label>
+    <input type="checkbox" id="showLabels" checked />
+    Show notation
+  </label>
+
+  <label>
+    <input type="checkbox" id="darkMode" />
+    Dark mode
+  </label>
+
+  <label>
+    Max Columns:
+    <input type="number" id="maxCols" min="1" style="width:70px;">
+  </label>
+
+  <label>
+    Max Rows:
+    <input type="number" id="maxRows" min="1" style="width:70px;">
+  </label>
+
+  <label>
+    Spacing:
+    <select id="gapPreset">
+      <option value="20,30" selected>Default</option>
+      <option value="0,0">Side-by-Side</option>
+      <option value="3,4.5">Extra Tight</option>
+      <option value="10,15">Tight</option>
+      <option value="16,24">Medium</option>
+      <option value="26,40">Loose</option>
+      <option value="40,60">Extra loose</option>
+    </select>
+  </label>
+
+  <label>
+    Single border:
+    <select id="tileBorderSize"></select>
+  </label>
+
+  <label>
+    Connected border:
+    <select id="groupBorderSize"></select>
+  </label>
+
+</div>
+
+<div id="out"></div>
+
+<script>
+const ns = "http://www.w3.org/2000/svg";
+
+const TILE = 90;
+const PAD  = 8;
+const GRID = TILE - PAD*2;
+const CELL = GRID / 2;
+
+// Curved radii for wide Fw/Bw
+const ARC_R_NORMAL     = 26;
+const ARC_R_WIDE_OUTER = ARC_R_NORMAL + 2;
+const ARC_R_WIDE_INNER = ARC_R_NORMAL * 0.75;
+
+/* ---------- helpers ---------- */
+function el(tag, attrs={}){
+  const e = document.createElementNS(ns, tag);
+  for (const [k,v] of Object.entries(attrs)) e.setAttribute(k, v);
+  return e;
+}
+
+/*
+  Bracket grouping:
+  - Anything inside (), [], {} becomes ONE "group"
+  - Nested brackets treated as same group (depth>0)
+  - Brackets can be attached to tokens like [(R' or R2)]
+*/
+function parseAlg(str){
+  const tokens = str.trim().split(/\s+/).filter(Boolean);
+
+  const result = [];
+  let group = null;
+  let depth = 0;
+
+  for (let tok of tokens) {
+    const openMatch = tok.match(/^[\(\[\{]+/);
+    if (openMatch) {
+      depth += openMatch[0].length;
+      tok = tok.replace(/^[\(\[\{]+/, "");
+      if (depth > 0 && !group) group = [];
+    }
+
+    const closeMatch = tok.match(/[\)\]\}]+$/);
+    let closes = 0;
+    if (closeMatch) {
+      closes = closeMatch[0].length;
+      tok = tok.replace(/[\)\]\}]+$/, "");
+    }
+
+    if (tok) {
+      if (depth > 0) group.push(tok);
+      else result.push({ type:"single", move: tok });
+    }
+
+    if (closes) {
+      depth = Math.max(0, depth - closes);
+      if (depth === 0 && group && group.length) {
+        result.push({ type:"group", moves: group });
+        group = null;
+      } else if (depth === 0) {
+        group = null;
+      }
+    }
+  }
+
+  // unclosed brackets safety
+  if (group && group.length) group.forEach(m => result.push({ type:"single", move: m }));
+
+  return result;
+}
+
+function parseMove(tokRaw){
+  const tok = tokRaw.trim();
+  if (!tok) return null;
+
+  const c0 = tok[0];
+  const baseUpper = c0.toUpperCase();
+
+  const isPrime  = tok.includes("'");
+  const isDouble = tok.includes("2");
+
+  // 2x2: allow only face turns + cube rotations (no wide, no slices)
+  const allowed = new Set(["R","L","U","D","F","B","X","Y","Z"]);
+
+  // reject lowercase and any "w" wide notation
+  if (c0 !== c0.toUpperCase() && !["x","y","z"].includes(c0)) return null;
+  if (tok.length >= 2 && tok[1].toLowerCase() === "w") return null;
+  if (!allowed.has(baseUpper)) return null;
+
+  let dir = null;
+
+  // Face turns
+  if (baseUpper === "R") dir = isPrime ? "down" : "up";
+  if (baseUpper === "L") dir = isPrime ? "up"   : "down";
+  if (baseUpper === "U") dir = isPrime ? "right": "left";
+  if (baseUpper === "D") dir = isPrime ? "left" : "right";
+  if (baseUpper === "F") dir = isPrime ? "ccw"  : "cw";
+  if (baseUpper === "B") dir = isPrime ? "cw"   : "ccw";
+
+  // Rotations
+  if (baseUpper === "X") dir = isPrime ? "down" : "up";
+  if (baseUpper === "Y") dir = isPrime ? "right": "left";
+  if (baseUpper === "Z") dir = isPrime ? "ccw"  : "cw";
+
+  return { tok, baseUpper, dir, isPrime, isDouble };
+}
+
+function notationString(ins){
+  let s = ins.baseUpper;
+  if (ins.isPrime)  s += "'";
+  if (ins.isDouble) s += "2";
+  return s;
+}
+
+/* ---------- grid (optionally remove inner verticals ONLY in middle row) ---------- */
+function drawGrid(svg){
+  // verticals (0..2)
+  for (let i=0;i<=2;i++){
+    const x = PAD + i*CELL;
+    svg.appendChild(el("line",{
+      x1:x, y1:PAD,
+      x2:x, y2:PAD + GRID,
+      stroke:"var(--stroke)",
+      "stroke-width":"2"
+    }));
+  }
+
+  // horizontals (0..2)
+  for (let i=0;i<=2;i++){
+    const y = PAD + i*CELL;
+    svg.appendChild(el("line",{
+      x1:PAD, y1:y,
+      x2:PAD + GRID, y2:y,
+      stroke:"var(--stroke)",
+      "stroke-width":"2"
+    }));
+  }
+}
+
+/* ---------- arrow markers (scaled) ---------- */
+function ensureArrowMarkers(svg){
+  let defs = svg.querySelector("defs");
+  if (!defs) { defs = el("defs"); svg.appendChild(defs); }
+
+  function addMarker(id, scale){
+    if (svg.querySelector("#" + id)) return;
+
+    const w = 4 * scale;
+    const h = 4 * scale;
+
+    const marker = el("marker",{
+      id,
+      markerWidth: String(w),
+      markerHeight: String(h),
+      refX: String(2.85 * scale),
+      refY: String(2 * scale),
+      orient: "90",
+      markerUnits: "strokeWidth"
+    });
+
+    marker.appendChild(el("path",{
+      d: `M 0 0 L ${w} ${h/2} L 0 ${h} z`,
+      fill: "var(--stroke)"
+    }));
+
+    defs.appendChild(marker);
+  }
+
+  addMarker("arrowHeadSmall", 1);
+  addMarker("arrowHeadWide",  ARC_R_WIDE_OUTER / ARC_R_NORMAL);
+  addMarker("arrowHeadInner", ARC_R_WIDE_INNER / ARC_R_NORMAL);
+}
+
+/* ---------- straight arrows ---------- */
+function drawStraightArrow(svg, dir, cx, cy, len=24){
+  const g = el("g",{ transform:`translate(${cx},${cy})` });
+  svg.appendChild(g);
+
+  const line = el("line",{
+    stroke:"var(--stroke)",
+    "stroke-width":"3",
+    "stroke-linecap":"round"
+  });
+
+  const head = el("polygon",{ fill:"var(--stroke)" });
+
+  if(dir==="up"){
+    line.setAttribute("x1",0); line.setAttribute("y1", len);
+    line.setAttribute("x2",0); line.setAttribute("y2",-len);
+    head.setAttribute("points", `0,${-len-8} -5,${-len+4} 5,${-len+4}`);
+  }
+  if(dir==="down"){
+    line.setAttribute("x1",0); line.setAttribute("y1",-len);
+    line.setAttribute("x2",0); line.setAttribute("y2", len);
+    head.setAttribute("points", `0,${len+8} -5,${len-4} 5,${len-4}`);
+  }
+  if(dir==="left"){
+    line.setAttribute("x1", len); line.setAttribute("y1",0);
+    line.setAttribute("x2",-len); line.setAttribute("y2",0);
+    head.setAttribute("points", `${-len-8},0 ${-len+4},-5 ${-len+4},5`);
+  }
+  if(dir==="right"){
+    line.setAttribute("x1",-len); line.setAttribute("y1",0);
+    line.setAttribute("x2", len); line.setAttribute("y2",0);
+    head.setAttribute("points", `${len+8},0 ${len-4},-5 ${len-4},5`);
+  }
+
+  g.appendChild(line);
+  g.appendChild(head);
+}
+
+function drawStraightArrowTailCut(svg, dir, cx, cy, len=14, tailCut=10){
+  // tailCut removes length from the BACK of the arrow only
+  const g = el("g",{ transform:`translate(${cx},${cy})` });
+  svg.appendChild(g);
+
+  const head = el("polygon",{ fill:"var(--stroke)" });
+
+  function addLine(x1,y1,x2,y2){
+    g.appendChild(el("line",{
+      x1, y1, x2, y2,
+      stroke:"var(--stroke)",
+      "stroke-width":"3",
+      "stroke-linecap":"round"
+    }));
+  }
+
+  if(dir==="up"){
+    // head at top, tail at bottom -> cut tail (bottom)
+    addLine(0,  len - tailCut, 0, -len);
+    head.setAttribute("points", `0,${-len-8} -5,${-len+4} 5,${-len+4}`);
+  }
+  if(dir==="down"){
+    // head at bottom, tail at top -> cut tail (top)
+    addLine(0, -len + tailCut, 0,  len);
+    head.setAttribute("points", `0,${len+8} -5,${len-4} 5,${len-4}`);
+  }
+  if(dir==="left"){
+    // head at left, tail at right -> cut tail (right)
+    addLine( len - tailCut, 0, -len, 0);
+    head.setAttribute("points", `${-len-8},0 ${-len+4},-5 ${-len+4},5`);
+  }
+  if(dir==="right"){
+    // head at right, tail at left -> cut tail (left)
+    addLine(-len + tailCut, 0,  len, 0);
+    head.setAttribute("points", `${len+8},0 ${len-4},-5 ${len-4},5`);
+  }
+
+  g.appendChild(head);
+}
+
+/* ---------- curved arcs ---------- */
+function arcPath(dir, cx, cy, r){
+  const off = 6 * (r / ARC_R_NORMAL);
+  if (dir === "cw")  return `M ${cx-r} ${cy-off} A ${r} ${r} 0 0 1 ${cx+r} ${cy+off}`;
+  return              `M ${cx+r} ${cy-off} A ${r} ${r} 0 0 0 ${cx-r} ${cy+off}`;
+}
+
+function drawCurvedMove(svg, dir, r=ARC_R_NORMAL, markerId="arrowHeadSmall"){
+  ensureArrowMarkers(svg);
+
+  const cx = PAD + GRID/2;
+  const cy = PAD + GRID/2;
+
+  svg.appendChild(el("path",{
+    d: arcPath(dir, cx, cy, r),
+    fill:"none",
+    stroke:"var(--stroke)",
+    "stroke-width":"3",
+    "stroke-linecap":"round",
+    "marker-end":`url(#${markerId})`
+  }));
+}
+
+function drawStraightArrowGap(svg, dir, cx, cy, len=24, gap=20){
+  const g = el("g",{ transform:`translate(${cx},${cy})` });
+  svg.appendChild(g);
+
+  const head = el("polygon",{ fill:"var(--stroke)" });
+  const a = gap / 2;
+
+  function addLine(x1,y1,x2,y2){
+    g.appendChild(el("line",{
+      x1, y1, x2, y2,
+      stroke:"var(--stroke)",
+      "stroke-width":"3",
+      "stroke-linecap":"round"
+    }));
+  }
+
+  if(dir==="up"){
+    addLine(0,  len, 0,  a);
+    addLine(0, -a,   0, -len);
+    head.setAttribute("points", `0,${-len-8} -5,${-len+4} 5,${-len+4}`);
+  }
+  if(dir==="down"){
+    addLine(0, -len, 0, -a);
+    addLine(0,  a,   0,  len);
+    head.setAttribute("points", `0,${len+8} -5,${len-4} 5,${len-4}`);
+  }
+  if(dir==="left"){
+    addLine( len, 0,  a,  0);
+    addLine(-a,   0, -len,0);
+    head.setAttribute("points", `${-len-8},0 ${-len+4},-5 ${-len+4},5`);
+  }
+  if(dir==="right"){
+    addLine(-len,0, -a,  0);
+    addLine( a,  0,  len,0);
+    head.setAttribute("points", `${len+8},0 ${len-4},-5 ${len-4},5`);
+  }
+
+  g.appendChild(head);
+}
+
+/* ---------- notation text ---------- */
+function drawCenterText(svg, textStr){
+  const x = PAD + GRID/2;
+  const y = PAD + GRID/2 + 7;
+
+  const t = el("text",{
+    x, y,
+    "text-anchor":"middle",
+    "font-size":"18",
+    "font-weight":"700",
+    fill:"var(--stroke)"
+  });
+
+  t.textContent = textStr;
+  svg.appendChild(t);
+}
+
+function drawCornerText2x2(svg, textStr, corner){
+  const xLeft  = PAD + 0.5 * CELL;
+  const xRight = PAD + 1.5 * CELL;
+  const yTop   = PAD + 0.5 * CELL;
+  const yBot   = PAD + 1.5 * CELL;
+
+  let x = xLeft;
+  let y = yTop;
+
+  if (corner === "tr") { x = xRight; y = yTop; }
+  if (corner === "bl") { x = xLeft;  y = yBot; }
+  if (corner === "br") { x = xRight; y = yBot; }
+
+  const t = el("text",{
+    x, y: y + 7,
+    "text-anchor":"middle",
+    "font-size":"18",
+    "font-weight":"700",
+    fill:"var(--stroke)"
+  });
+
+  t.textContent = textStr;
+  svg.appendChild(t);
+}
+
+/* ---------- cube rotations arrows ---------- */
+
+/* ---------- layout rule ---------- */
+function chooseColumns(n){
+  const maxColsInput = document.getElementById("maxCols").value;
+  const maxRowsInput = document.getElementById("maxRows").value;
+
+  const maxCols = maxColsInput ? parseInt(maxColsInput, 10) : null;
+  const maxRows = maxRowsInput ? parseInt(maxRowsInput, 10) : null;
+
+  // If user provided limits
+  if (maxCols || maxRows) {
+    let cols = maxCols || 1;
+
+    while (cols <= n) {
+      const rows = Math.ceil(n / cols);
+      if (maxRows && rows > maxRows) {
+        cols++;
+        continue;
+      }
+      return cols;
+    }
+
+    return Math.max(1, n);
+  }
+
+  // Default behavior (your +2 rule)
+  let cols = 3;
+  while (cols < n) {
+    const rows = Math.ceil(n / cols);
+    if (rows <= cols + 2) break;
+    cols++;
+  }
+  return Math.max(1, cols);
+}
+
+/* ---------- render tile ---------- */
+function renderTile(tokRaw, showLabel){
+  const ins = parseMove(tokRaw);
+  if (!ins || !ins.dir) return null;
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "tile";
+
+  const svg = el("svg", { width: TILE, height: TILE, viewBox: `0 0 ${TILE} ${TILE}` });
+  const note = notationString(ins);
+
+  // 2x2 grid
+  drawGrid(svg);
+
+  // 2x2 anchor points
+  const xLeft  = PAD + 0.5 * CELL;
+  const xRight = PAD + 1.5 * CELL;
+  const yTop   = PAD + 0.5 * CELL;
+  const yBot   = PAD + 1.5 * CELL;
+
+  // between the two columns/rows
+  const xMid = PAD + GRID / 2;
+  const yMid = PAD + GRID / 2;
+
+  // R/L/U/D: correct layer block
+  if (ins.baseUpper === "R") drawStraightArrow(svg, ins.dir, xRight, yMid, 20);
+  if (ins.baseUpper === "L") drawStraightArrow(svg, ins.dir, xLeft,  yMid, 20);
+  if (ins.baseUpper === "U") drawStraightArrow(svg, ins.dir, xMid,   yTop, 20);
+  if (ins.baseUpper === "D") drawStraightArrow(svg, ins.dir, xMid,   yBot, 20);
+
+  // F/B: centered curved arrow
+  if (ins.baseUpper === "F") drawCurvedMove(svg, ins.dir);
+  if (ins.baseUpper === "B") drawCurvedMove(svg, ins.dir);
+
+  // ---------- Rotations: shorten ONLY the part that overlaps notation ----------
+  const rotLen = 14;
+  const tailCut = 10;
+
+  // X: cut tail of LEFT column arrow only (label is on left side)
+  if (ins.baseUpper === "X") {
+  drawStraightArrow(svg, ins.dir, xRight, yMid, rotLen);
+
+  // x/x2 label bottom-left -> tail is near bottom for UP arrow, near top for DOWN arrow
+  // x' label top-left -> same idea, but label sits top so we want a bit more tail cut
+  const cut = ins.isPrime ? 12 : 10;
+  drawStraightArrowTailCut(svg, ins.dir, xLeft, yMid, rotLen, cut);
+  }
+
+  // Y: cut tail of TOP row arrow only (label is on top row)
+  if (ins.baseUpper === "Y") {
+  drawStraightArrow(svg, ins.dir, xMid, yBot, rotLen);
+
+  // y/y2 label top-right, y' top-left -> both on top row, so always cut top-row arrow tail
+  drawStraightArrowTailCut(svg, ins.dir, xMid, yTop, rotLen, 10);
+  }
+
+  // Z: unchanged here (you didn't ask for changes)
+  if (ins.baseUpper === "Z") {
+    drawCurvedMove(svg, ins.dir, 34, "arrowHeadWide");
+    drawCurvedMove(svg, ins.dir, 14, "arrowHeadInner");
+  }
+
+  // ---------- Notation ----------
+  if (showLabel) {
+    let corner = "tl";
+
+    // ROTATIONS
+    if (ins.baseUpper === "X") {
+      corner = ins.isPrime ? "tl" : "bl"; // x/x2 bottom-left, x' top-left
+      drawCornerText2x2(svg, note, corner);
+    }
+    else if (ins.baseUpper === "Y") {
+      corner = ins.isPrime ? "tl" : "tr"; // y/y2 top-right, y' top-left
+      drawCornerText2x2(svg, note, corner);
+    }
+    else if (ins.baseUpper === "Z") {
+      corner = ins.isPrime ? "br" : "bl"; // z/z2 bottom-left, z' bottom-right
+      drawCornerText2x2(svg, note, corner);
+    }
+    // FACE MOVES
+    else {
+      if (ins.baseUpper === "R") corner = "tl";
+      if (ins.baseUpper === "D") corner = "tl";
+      if (ins.baseUpper === "L") corner = "tr";
+      if (ins.baseUpper === "U") corner = "bl";
+
+      if (ins.baseUpper === "F" && !ins.isPrime) corner = "bl";
+      if (ins.baseUpper === "B" && ins.isPrime)  corner = "bl";
+
+      if (ins.baseUpper === "F" && ins.isPrime)  corner = "br";
+      if (ins.baseUpper === "B" && !ins.isPrime) corner = "br";
+
+      drawCornerText2x2(svg, note, corner);
+    }
+  }
+
+  wrapper.appendChild(svg);
+  return wrapper;
+}
+
+/* ---------- render algorithm (with bracket outlines) ---------- */
+function renderAlg(){
+  const out = document.getElementById("out");
+  const showLabel = document.getElementById("showLabels").checked;
+
+  const parsed = parseAlg(document.getElementById("alg").value);
+
+  // Flatten moves, preserve group membership, BUT skip unsupported moves
+const flat = [];
+let gid = 0;
+
+function pushIfSupported(move, groupId){
+  const ins = parseMove(move);
+  if (!ins) return false; // skip (2x2 ignores wide/slices/etc)
+  flat.push({ move, groupId });
+  return true;
+}
+
+parsed.forEach(item => {
+  if (item.type === "single") {
+    pushIfSupported(item.move, null);
+  } else {
+    gid++;
+    let keptAny = false;
+    item.moves.forEach(m => {
+      if (pushIfSupported(m, gid)) keptAny = true;
+    });
+    // if group ended up empty, do nothing (no outline will be created)
+    if (!keptAny) gid--; // reuse id so ids don't grow for empty groups
+  }
+});
+
+  let cols = chooseColumns(flat.length);
+  cols = Math.max(1, Number(cols) || 1);
+
+  out.style.gridTemplateColumns = `repeat(${cols}, max-content)`;
+  out.innerHTML = "";
+
+  // group ranges
+  const groupRanges = new Map();
+  flat.forEach((it, i) => {
+    if (it.groupId == null) return;
+    const r = groupRanges.get(it.groupId);
+    if (!r) groupRanges.set(it.groupId, { start:i, end:i });
+    else r.end = i;
+  });
+
+  // Add group spans FIRST (they don't affect layout; z-index draws on top)
+  for (const [, range] of groupRanges.entries()) {
+    const start = range.start;
+    const end   = range.end;
+
+    const startRow = Math.floor(start / cols) + 1;
+    const endRow   = Math.floor(end   / cols) + 1;
+
+    for (let row = startRow; row <= endRow; row++) {
+      const rowStartIndex = (row - 1) * cols;
+      const rowEndIndex   = rowStartIndex + (cols - 1);
+
+      const segStartIndex = Math.max(start, rowStartIndex);
+      const segEndIndex   = Math.min(end, rowEndIndex);
+
+      const segStartCol = (segStartIndex % cols) + 1;
+      const segEndCol   = (segEndIndex   % cols) + 1;
+
+      const span = document.createElement("div");
+      span.className = "group-span";
+      span.style.gridRow = String(row);
+      span.style.gridColumn = `${segStartCol} / ${segEndCol + 1}`;
+
+      // If this row-segment is NOT the final segment of the whole group, remove the right border cap
+      const isLastSegmentOfGroup = (segEndIndex === end);
+       if (!isLastSegmentOfGroup) span.classList.add("no-right");
+
+      // If this row-segment is NOT the first segment of the whole group, remove the left border cap
+      const isFirstSegmentOfGroup = (segStartIndex === start);
+      if (!isFirstSegmentOfGroup) span.classList.add("no-left");
+
+out.appendChild(span);
+    }
+  }
+
+  // Add tiles
+  flat.forEach((it, i) => {
+    const tile = renderTile(it.move, showLabel);
+    if (!tile) return;
+
+    const row = Math.floor(i / cols) + 1;
+    const col = (i % cols) + 1;
+
+    tile.style.gridRow = String(row);
+    tile.style.gridColumn = String(col);
+
+    if (it.groupId != null) tile.classList.add("no-border");
+
+    out.appendChild(tile);
+  });
+}
+
+/* ---------- Border size menues ---------- */
+function setupBorderDropdowns(){
+  const tileSel = document.getElementById("tileBorderSize");
+  const groupSel = document.getElementById("groupBorderSize");
+  const root = document.documentElement;
+
+  function buildOptions(select, defaultValue){
+    select.innerHTML = "";
+
+    // Default option
+    const def = document.createElement("option");
+    def.value = "default";
+    def.textContent = "Default";
+    select.appendChild(def);
+
+    // 1px → 5px
+    for (let v = 1; v <= 5; v++){
+      const opt = document.createElement("option");
+      opt.value = String(v);
+      opt.textContent = v + "px";
+      if (v === defaultValue) opt.selected = true;
+      select.appendChild(opt);
+    }
+  }
+
+  buildOptions(tileSel, 1);
+  buildOptions(groupSel, 3);
+
+  function apply(){
+    // SINGLE tiles
+    if (tileSel.value === "default")
+      root.style.setProperty("--tileBorderW", "1px");
+    else
+      root.style.setProperty("--tileBorderW", tileSel.value + "px");
+
+    // CONNECTED groups
+    if (groupSel.value === "default")
+      root.style.setProperty("--groupBorderW", "3.5px");
+    else
+      root.style.setProperty("--groupBorderW", groupSel.value + "px");
+
+    renderAlg();
+  }
+
+  tileSel.addEventListener("change", apply);
+  groupSel.addEventListener("change", apply);
+
+  apply();
+}
+
+/* ---------- events ---------- */
+document.getElementById("showLabels").addEventListener("change", renderAlg);
+document.getElementById("alg").addEventListener("input", renderAlg);
+
+document.getElementById("maxCols").addEventListener("input", renderAlg);
+document.getElementById("maxRows").addEventListener("input", renderAlg);
+
+document.getElementById("darkMode").addEventListener("change", (e) => {
+  document.body.classList.toggle("dark", e.target.checked);
+  renderAlg();
+});
+
+document.getElementById("clearBtn").addEventListener("click", () => {
+  document.getElementById("alg").value = "";
+  renderAlg();
+});
+
+document.getElementById("gapPreset").addEventListener("change", (e) => {
+  const [gy, gx] = e.target.value.split(",").map(Number);
+  const out = document.getElementById("out");
+  out.style.setProperty("--gapY", gy + "px");
+  out.style.setProperty("--gapX", gx + "px");
+  renderAlg();
+});
+
+document.getElementById("cubeSelect").addEventListener("change", (e) => {
+  const url = e.target.value;
+  if (url) window.location.href = url;
+});
+
+// apply dark mode on load
+document.body.classList.toggle("dark", document.getElementById("darkMode").checked);
+
+setupBorderDropdowns();
+renderAlg();
+</script>
+
+</body>
+</html>
